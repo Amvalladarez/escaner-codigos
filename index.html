@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Escáner de códigos</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font:18px system-ui,-apple-system,"Segoe UI",sans-serif;background:#f5f5f5;color:#111}
+  main{max-width:520px;margin:0 auto;padding:12px}
+  h1{font-size:24px;margin:8px 0 12px}
+  video{width:100%;aspect-ratio:3/4;object-fit:cover;background:#000;border-radius:12px}
+  button{display:block;width:100%;font-size:20px;padding:16px;border:0;border-radius:12px;background:#1d4ed8;color:#fff;margin:10px 0}
+  button.sec{background:#374151}
+  label{display:block;margin:14px 0 6px;font-weight:600}
+  input,select,textarea{width:100%;font-size:20px;padding:12px;border:1px solid #aaa;border-radius:10px;background:#fff;color:#111}
+  #msg{min-height:1.6em;margin:10px 0;font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <h1>Escáner de códigos</h1>
+  <video id="cam" playsinline muted autoplay></video>
+  <button id="start" type="button">Iniciar cámara</button>
+  <button id="stop" type="button" class="sec">Detener cámara</button>
+
+  <label for="tipo">Tipo</label>
+  <select id="tipo">
+    <option value="Bodega">Bodega</option>
+    <option value="Medidor">Medidor</option>
+  </select>
+
+  <label for="codigo">Código</label>
+  <input id="codigo" inputmode="numeric" autocomplete="off">
+
+  <label for="cantidad">Cantidad o lectura</label>
+  <input id="cantidad" type="number" min="0" step="any" value="1">
+
+  <label for="usuario">Usuario</label>
+  <input id="usuario" autocomplete="name">
+
+  <label for="notas">Notas</label>
+  <textarea id="notas" rows="3"></textarea>
+
+  <button id="guardar" type="button">Guardar</button>
+  <div id="msg" role="status" aria-live="polite"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+  // Endpoint de Apps Script y token. Se publican en la página, así que el token es solo una protección básica.
+  const URL_SCRIPT = 'https://script.google.com/macros/s/AKfycbwZDpvKHmB74J3EAn5nxZkVAsTvEQG-9pQGo6SyMbRMfaygco4acKnKIRMM8QSBj5z4Ww/exec';
+  const TOKEN = 'MI-TOKEN';
+
+  const $ = (id) => document.getElementById(id);
+  const video = $('cam');
+  let stream = null;
+  let detector = null;
+  let detectTimer = null;
+  let zxingReader = null;
+  let lastCode = '';
+  let lastTime = 0;
+
+  function msg(texto) { $('msg').textContent = texto; }
+
+  function onCode(code) {
+    const ahora = Date.now();
+    if (code === lastCode && ahora - lastTime < 2000) return;
+    lastCode = code;
+    lastTime = ahora;
+    $('codigo').value = code;
+    if (navigator.vibrate) navigator.vibrate(100);
+    msg('Leído: ' + code);
+  }
+
+  async function iniciar() {
+    if (stream) return;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+    } catch (e) {
+      stream = null;
+      msg('No se pudo abrir la cámara: ' + e.message);
+      return;
+    }
+
+    // Android y la mayoría de navegadores modernos: BarcodeDetector
+    if ('BarcodeDetector' in window) {
+      try {
+        detector = new BarcodeDetector({ formats: ['ean_13', 'code_128'] });
+        detectTimer = setInterval(async () => {
+          try {
+            const codigos = await detector.detect(video);
+            if (codigos.length) onCode(codigos[0].rawValue);
+          } catch (e) { /* cuadro sin lectura */ }
+        }, 200);
+        msg('Apunta la cámara al código.');
+        return;
+      } catch (e) {
+        detector = null;
+      }
+    }
+
+    // iPhone y otros: ZXing
+    if (window.ZXing) {
+      const pistas = new Map();
+      pistas.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.CODE_128]);
+      zxingReader = new ZXing.BrowserMultiFormatReader(pistas);
+      zxingReader.decodeFromVideoElement(video, (resultado) => {
+        if (resultado) onCode(resultado.getText());
+      });
+      msg('Apunta la cámara al código.');
+    } else {
+      msg('No hay lector de códigos disponible en este navegador.');
+    }
+  }
+
+  function detener() {
+    if (detectTimer) { clearInterval(detectTimer); detectTimer = null; }
+    if (zxingReader) { zxingReader.reset(); zxingReader = null; }
+    if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+    video.srcObject = null;
+    msg('Cámara detenida.');
+  }
+
+  async function guardar() {
+    const codigo = $('codigo').value.trim();
+    if (!codigo) { msg('Escribe o escanea un código antes de guardar.'); return; }
+    const datos = new URLSearchParams({
+      token: TOKEN,
+      hoja: 'Escaneos',
+      tipo: $('tipo').value,
+      codigo: codigo,
+      cantidad: $('cantidad').value,
+      usuario: $('usuario').value,
+      notas: $('notas').value
+    });
+    msg('Guardando...');
+    try {
+      // no-cors: el navegador no permite leer la respuesta de Apps Script desde otra página.
+      await fetch(URL_SCRIPT, { method: 'POST', body: datos, mode: 'no-cors' });
+      msg('Enviado. Revisa la hoja Escaneos para confirmar la fila.');
+      $('codigo').value = '';
+      $('notas').value = '';
+      lastCode = '';
+    } catch (e) {
+      msg('Error de red: no se pudo enviar.');
+    }
+  }
+
+  $('start').addEventListener('click', iniciar);
+  $('stop').addEventListener('click', detener);
+  $('guardar').addEventListener('click', guardar);
+</script>
+</body>
+</html>
